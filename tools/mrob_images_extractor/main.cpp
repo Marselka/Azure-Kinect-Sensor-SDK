@@ -82,15 +82,17 @@ void parallel_for(unsigned nb_elements,
 
 bool extract(k4a_capture_t capture, const char * output_path, k4a_transformation_t transformation, k4a_image_t transformed_depth_image,
     int color_image_width_pixels, int color_image_height_pixels, int depth_image_width_pixels, int depth_image_height_pixels, 
-    cv::Mat distortion, cv::Matx33d matrix, std::vector<int> compression_params, bool undist_project)
+    cv::Mat distortion, cv::Matx33d matrix, std::vector<int> compression_params, bool undist_project, bool extract_ir_images)
 {
     k4a_image_t depth_image = NULL;
     k4a_image_t color_image = NULL;
+    k4a_image_t ir_image = NULL;
 
     uint64_t color_timestamp;
     uint64_t depth_timestamp;
     char color_filename [1024];
     char depth_filename [1024];
+    char ir_filename [1024];
 
     uint8_t * buffer;
     uint32_t size;
@@ -112,10 +114,24 @@ bool extract(k4a_capture_t capture, const char * output_path, k4a_transformation
         return true;
     }
 
+    if (extract_ir_images) {
+        ir_image = k4a_capture_get_ir_image(capture);
+        if (ir_image == 0) {
+            k4a_image_release(color_image);
+            k4a_image_release(depth_image);
+            k4a_capture_release(capture);
+            return true;
+        }
+    }
+
+
     color_timestamp = k4a_image_get_device_timestamp_usec(color_image);
     sprintf (color_filename, "%s/color/%012ld.jpg", output_path, color_timestamp);
     depth_timestamp = k4a_image_get_device_timestamp_usec(depth_image);
     sprintf (depth_filename, "%s/depth/%012ld.png", output_path, depth_timestamp);
+    if (extract_ir_images) {
+        sprintf (ir_filename, "%s/ir/%012ld.png", output_path, depth_timestamp);
+    }
 
     if (!undist_project) {
         FILE * pFile;
@@ -132,10 +148,17 @@ bool extract(k4a_capture_t capture, const char * output_path, k4a_transformation
         }
 
         buffer = k4a_image_get_buffer(depth_image);
-        size = k4a_image_get_size(depth_image);
 
         img_array = cv::Mat(depth_image_height_pixels, depth_image_width_pixels, CV_16UC1, buffer);
         cv::imwrite(depth_filename,  img_array);
+
+        if (extract_ir_images) {
+            buffer = k4a_image_get_buffer(ir_image);
+
+            img_array = cv::Mat(depth_image_height_pixels, depth_image_width_pixels, CV_16UC1, buffer);
+            cv::imwrite(ir_filename,  img_array);
+        }
+
     }
     else {
         if (K4A_RESULT_SUCCEEDED !=
@@ -164,6 +187,12 @@ bool extract(k4a_capture_t capture, const char * output_path, k4a_transformation
         }
     }
 
+    if (extract_ir_images) {
+        if (ir_image != NULL)
+        {
+            k4a_image_release(ir_image);
+        }
+    }
     if (depth_image != NULL)
     {
         k4a_image_release(depth_image);
@@ -181,7 +210,7 @@ bool extract(k4a_capture_t capture, const char * output_path, k4a_transformation
 }
 
 
-static int playback(char *input_path, const char * output_path, bool undist_project)
+static int playback(char *input_path, const char * output_path, bool undist_project, bool extract_ir_images)
 {
     k4a_playback_t playback = NULL;
 
@@ -292,7 +321,7 @@ static int playback(char *input_path, const char * output_path, bool undist_proj
                     output_path, transformation, array_of_transformed_depth_images[i], 
                     color_image_width_pixels, color_image_height_pixels, 
                     depth_image_width_pixels, depth_image_height_pixels, 
-                    distortion, matrix, compression_params, undist_project);
+                    distortion, matrix, compression_params, undist_project, extract_ir_images);
                 if (array_of_extraction_results[i] == false) {
                     printf("Extraction failed\n");
                     // should be proper handling
@@ -327,6 +356,7 @@ static int playback(char *input_path, const char * output_path, bool undist_proj
 int main(int argc, char **argv)
 {
     int extraction_mode = 0;
+    int extract_ir_images = 0;
     int return_code = 0;
 
     CmdParser::OptionParser cmd_parser;
@@ -349,6 +379,26 @@ int main(int argc, char **argv)
                                   throw std::runtime_error(str.str());
                                   }
                               });
+    cmd_parser.RegisterOption("--extract-ir-images",
+                              "Either extract or not infrared images in addition to color and depth ones (default: 0).\n"
+                              "Not available if \"--mode\" equals 1 since infrared to color frame projection doesn't work properly.\n"
+                              "0 - do not extract infrared images.\n"
+                              "1 - extract infrared images.",
+                              1,
+                              [&](const std::vector<char *> &args) {
+                              extract_ir_images = std::stoi(args[0]);
+                              if (extract_ir_images != 0 && extract_ir_images != 1) {
+                                  std::ostringstream str;
+                                  str << "Infrared images extraction mode " << extract_ir_images <<" is unknown. Must be either 0 or 1";
+                                  throw std::runtime_error(str.str());
+                                  }
+                              if (extraction_mode == 1 && extract_ir_images == 1) {
+                                  std::ostringstream str;
+                                  str << "Extraction of infrared images is not available when \"--mode\" equals 1 "
+                                  "since infrared to color frame projection doesn't work properly.";
+                                  throw std::runtime_error(str.str());
+                                  }
+                              });
 
     int args_left = 0;
     try
@@ -362,12 +412,7 @@ int main(int argc, char **argv)
     }
     if (args_left == 2)
     {
-        if (extraction_mode == 0) {
-            return_code = playback(argv[argc - 2], argv[argc -1], false);
-        }
-        else if (extraction_mode == 1) {
-            return_code = playback(argv[argc - 2], argv[argc -1], true);
-        }
+        return_code = playback(argv[argc - 2], argv[argc -1], extraction_mode, extract_ir_images);
     }
     else
     {
